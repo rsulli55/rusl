@@ -1,7 +1,9 @@
 use clap::Parser;
 use std::fmt;
+use std::fmt::Display;
 use std::fs;
 use std::fs::File;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 const PROGRAM: &str = "rusl";
@@ -26,34 +28,65 @@ struct Args {
     human_readable: bool,
 }
 
+struct DisplayOptions {
+    /// show hidden paths
+    all: bool,
+
+    /// use long listing format
+    long: bool,
+
+    /// use human readable sizes
+    human_readable: bool,
+}
+
+fn display_dir(opts: &DisplayOptions, dir: &Path) {
+    let entries = dir.read_dir().expect("{dir} is not a directory: ");
+    for p in entries {
+        if p.is_ok() {
+            println!("{}", p.unwrap().path().display())
+        }
+    }
+}
+
 fn print_error_msg(what: &str, why: &str) {
     eprintln!("{PROGRAM}: {what}: {why}");
 }
 
-fn check_path(path: &Path) -> bool {
-    match   fs::metadata(path) {
-        Ok(_) => todo!(),
-        Err(_) => todo!(),
+fn stat_path(path: &Path) -> Option<fs::Metadata> {
+    match fs::metadata(path) {
+        Ok(meta) => Some(meta),
+        Err(err) => {
+            match err.kind() {
+                ErrorKind::NotFound => {
+                    print_error_msg(
+                        &format!("cannot access '{}'", path.display()),
+                        ERR_NO_SUCH_FILE_OR_DIR,
+                    );
+                }
+                ErrorKind::PermissionDenied => {
+                    print_error_msg(
+                        &format!("cannot access '{}'", path.display()),
+                        ERR_PERM_DENIED,
+                    );
+                }
+                _ => {
+                    print_error_msg(
+                        &format!("cannot access '{}'", path.display()),
+                        "unknown error",
+                    );
+                }
+            }
+            None
+        }
     }
 }
 
-fn collect_filebufs(paths: &[&str]) -> Vec<PathBuf> {
-    let paths = paths.iter().map(|p| Path::new(p));
-    let paths = paths.filter_map(|p| {
-        match p.ex
-    })
-    let mut res = Vec::new();
-    for p in paths {
-        match std::path::exists(p) {
-            Ok(b) if !b => {
-                print_error_msg(&format!("cannot access '{p}'"), ERR_NO_SUCH_FILE_OR_DIR);
-            }
-            Ok(b) => res.push(PathBuf::from(p)),
-            Err(e) => match e {},
-        }
-    }
-
-    res
+fn collect_filestats(paths: &[&str]) -> Vec<fs::Metadata> {
+    paths
+        .iter()
+        .map(|p| Path::new(p))
+        .filter_map(|p| stat_path(p))
+        .collect()
 }
 
 fn main() {
