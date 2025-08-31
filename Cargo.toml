@@ -5,3 +5,5 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4.5.45", features = ["derive"] }
+itertools = "0.14.0"
+termion = "4.0.5"
