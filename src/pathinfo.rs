@@ -7,6 +7,7 @@ use std::os::linux::fs::MetadataExt;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+/// Holds both the path to a file and associated metadata.
 #[derive(Debug, Clone)]
 pub struct PathInfo {
     /// file path
@@ -35,6 +36,7 @@ impl Ord for PathInfo {
     }
 }
 
+/// Display the final component of `path` field of `self`, ignorring any non-UTF8 characters
 impl Display for PathInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = self

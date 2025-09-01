@@ -1,5 +1,7 @@
 use std::fmt;
 use std::fmt::Display;
+
+/// Stores the file mode obtained from `fs::mode()` or `fs::st_mode()`.
 pub struct FileMode(pub u32);
 
 impl FileMode {
@@ -50,19 +52,19 @@ impl Display for FileMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let user_write = if self.user_write() { "w" } else { "-" };
         let user_read = if self.user_read() { "r" } else { "-" };
-        let user_execute = if self.user_execute() {
-            "x"
-        } else if self.suid_bit() {
+        let user_execute = if self.suid_bit() {
             "s"
+        } else if self.user_execute() {
+            "x"
         } else {
             "-"
         };
         let group_write = if self.group_write() { "w" } else { "-" };
         let group_read = if self.group_read() { "r" } else { "-" };
-        let group_execute = if self.group_execute() {
-            "x"
-        } else if self.sgid_bit() {
+        let group_execute = if self.sgid_bit() {
             "s"
+        } else if self.group_execute() {
+            "x"
         } else {
             "-"
         };

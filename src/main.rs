@@ -21,6 +21,7 @@ use termion::color;
 use termion::style;
 use termion::terminal_size;
 
+/// Command-line arguments for the program.
 #[derive(Debug, Parser)]
 #[command(disable_help_flag(true))]
 struct Args {
@@ -44,6 +45,7 @@ struct Args {
     help: Option<bool>,
 }
 
+/// Display options for formatting output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DisplayOptions {
     /// show hidden paths
@@ -66,11 +68,13 @@ impl From<&Args> for DisplayOptions {
     }
 }
 
+/// Format and print an error message.
 fn print_error_msg(what: &str, why: &str) {
     eprintln!("{PROGRAM}: {what}: {why}");
 }
 
-fn inspect_io_error(path: &Path, err: &Error) {
+/// Print `std::io::Error`s using predefined formats taken from ls errors.
+fn print_io_error(path: &Path, err: &Error) {
     match err.kind() {
         ErrorKind::NotFound => {
             print_error_msg(
@@ -93,16 +97,18 @@ fn inspect_io_error(path: &Path, err: &Error) {
     }
 }
 
+/// Get metadata for a path, printing errors if any.
 fn stat_path(path: &Path) -> Option<fs::Metadata> {
     match fs::metadata(path) {
         Ok(meta) => Some(meta),
         Err(err) => {
-            inspect_io_error(path, &err);
+            print_io_error(path, &err);
             None
         }
     }
 }
 
+/// Attempt to create and collect `PathInfo` for each path in `paths`
 fn collect_pathinfo(paths: &[&Path]) -> Vec<PathInfo> {
     paths
         .iter()
@@ -110,12 +116,14 @@ fn collect_pathinfo(paths: &[&Path]) -> Vec<PathInfo> {
         .collect()
 }
 
+/// Check if a path is hidden (starts with '.').
 fn is_hidden(path: &Path) -> bool {
     path.file_name()
         .map(|s| s.to_string_lossy())
         .is_some_and(|s| s.starts_with('.'))
 }
 
+/// Recursively collect `PathInfo` for a directory, optionally ignoring hidden files.
 fn recurse_dir(ignore_hidden: bool, dir: &Path) -> Vec<PathInfo> {
     match dir.read_dir() {
         Ok(entries) => entries
@@ -135,13 +143,13 @@ fn recurse_dir(ignore_hidden: bool, dir: &Path) -> Vec<PathInfo> {
                     }
                 }
                 Err(err) => {
-                    inspect_io_error(&p.path(), &err);
+                    print_io_error(&p.path(), &err);
                     None
                 }
             })
             .collect(),
         Err(err) => {
-            inspect_io_error(dir, &err);
+            print_io_error(dir, &err);
             Vec::new()
         }
     }
@@ -213,6 +221,8 @@ fn display_paths(opts: &DisplayOptions, term_cols: usize, paths: &[PathInfo]) {
     }
 }
 
+/// Display `paths` ascending down columns using the number of columns and
+/// column widths specified by `layout`
 fn display_by_cols(layout: &LayoutInfo, paths: &[PathInfo]) {
     let num_cols = layout.num_cols;
     // the first num_rows rows will be full
@@ -246,11 +256,14 @@ fn display_by_cols(layout: &LayoutInfo, paths: &[PathInfo]) {
     }
 }
 
-fn is_executable(metadata: &Metadata) -> bool {
-    let mode = FileMode(metadata.st_mode());
+/// Check if `meta` represents an executable file (i.e., any execute bit set)
+fn is_executable(meta: &Metadata) -> bool {
+    let mode = FileMode(meta.st_mode());
     mode.user_execute() || mode.group_execute() || mode.other_execute()
 }
 
+/// Print `path` using ls-like colors according to the file type.
+/// Add whitespace after the path to fill `col_width` characters.
 fn print_pathinfo(path: &PathInfo, col_width: usize) {
     let s = path.to_string();
     // when there is only 1 column, it is possible that the width does not accomodate the
@@ -288,6 +301,8 @@ fn print_pathinfo(path: &PathInfo, col_width: usize) {
     }
 }
 
+/// Display `paths` ascending across rows using the number of columns and
+/// column widths specified by `layout`
 fn display_by_lines(layout: &LayoutInfo, paths: &[PathInfo]) {
     let chunks = paths.chunks(layout.num_cols);
     for chunk in chunks {
@@ -298,6 +313,9 @@ fn display_by_lines(layout: &LayoutInfo, paths: &[PathInfo]) {
     }
 }
 
+/// Collect and print the children of `dir` using `recurse_dir()`.
+/// Optionally, include a total size if `opts.long`
+/// is `true` and skip hidden children if `opts.all` is `false`.
 fn display_dir_contents(opts: &DisplayOptions, term_cols: usize, dir: &PathInfo) {
     if opts.long {
         println!("total {}", dir.meta.st_size());
@@ -308,7 +326,9 @@ fn display_dir_contents(opts: &DisplayOptions, term_cols: usize, dir: &PathInfo)
         .collect();
     display_paths(opts, term_cols, &children);
 }
-
+/// Iterate over all directories in `dirs`, displaying each.
+/// If there is more than one directory, preface the directory contents with
+/// the directory name.
 fn display_dirs(opts: &DisplayOptions, term_cols: usize, dirs: &[PathInfo]) {
     // print files from dirs grouped if there are more than one
     if dirs.len() > 1 {

@@ -3,6 +3,7 @@ use std::slice::ChunksExact;
 
 use crate::constants::*;
 
+/// Stores layout information for displaying items in columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutInfo {
     pub num_cols: usize,
@@ -26,7 +27,8 @@ impl Default for LayoutInfo {
         }
     }
 }
-
+/// Calculates the column widths needed to accomodate all elements of `lens` in `num_cols`
+/// columns where elements of `lens` are placed down columns in order.
 fn col_widths_by_cols(min_width: usize, num_cols: usize, lens: &[usize]) -> Vec<usize> {
     let num_rows = lens.len() / num_cols;
     let rem = lens.len() % num_cols;
@@ -53,6 +55,8 @@ fn col_widths_by_cols(min_width: usize, num_cols: usize, lens: &[usize]) -> Vec<
     [start_col_widths, fin_col_widths].concat()
 }
 
+/// Calculates the column widths needed to accomodate all elements of `lens` in `num_cols`
+/// columns where elements of `lens` are placed across rows in order.
 fn col_widths_by_lines(min_width: usize, num_cols: usize, lens: &[usize]) -> Vec<usize> {
     let mut col_width = Vec::with_capacity(num_cols);
     for offset in 0..num_cols {
@@ -60,28 +64,16 @@ fn col_widths_by_lines(min_width: usize, num_cols: usize, lens: &[usize]) -> Vec
             .iter()
             .step_by(num_cols)
             .fold(min_width, |acc, l| std::cmp::max(acc, *l));
-        dbg!(num_cols, offset, width);
         col_width.push(width);
     }
-    dbg!(&col_width);
     col_width
 }
 
 /// Determines the layout for displaying a list of strings within the current terminal width with
-/// the maximal amount of columns.
-///
-/// This function calculates possible layouts for the given `paths` based on the available terminal columns (`term_cols`)
-/// and the minimum column size. It tries different numbers of columns, computes the required width for each layout,
-/// and selects the most space-efficient layout that fits within the terminal.
-///
-/// # Parameters
-/// - `by_lines`: If `true`, strings in `str_paths` are layed out across rows, otherwise down columns.
-/// - `term_cols`: The total number of columns available in the terminal.
-/// - `paths`: A slice of PathInfo representing the items to be displayed.
-///
-/// # Returns
-/// A `LayoutInfo` struct describing the chosen layout (number of columns and their widths). If no valid layout fits,
-/// returns a default `LayoutInfo`.
+/// the maximal amount of columns. Each element of `lens` represents a string length that must fit
+/// within its assigned column.
+/// If `by_lines` is `true` the layout is determined by placing `lens`
+/// in order across rows. Otherwise, `lens` are placed down columns.
 pub fn determine_layout(by_lines: bool, term_cols: usize, lens: &[usize]) -> LayoutInfo {
     let max_cols = std::cmp::min(term_cols / MIN_COL_SIZE, lens.len());
 
@@ -92,13 +84,11 @@ pub fn determine_layout(by_lines: bool, term_cols: usize, lens: &[usize]) -> Lay
         } else {
             col_widths_by_cols(MIN_COL_SIZE, num_cols, lens)
         };
-        dbg!(&col_width);
         let total_width: usize = col_width.iter().sum();
         if total_width <= term_cols {
             valid_layouts.push(LayoutInfo::new(num_cols, col_width));
         }
     }
-    dbg!(&valid_layouts);
     valid_layouts.pop().unwrap_or_default()
 }
 
