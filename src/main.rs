@@ -156,7 +156,9 @@ fn recurse_dir(ignore_hidden: bool, dir: &Path) -> Vec<PathInfo> {
 }
 
 /// Display `paths` using the long format for ls. The structure for the format is
+/// ```
 /// filetype_and_mode number_of_links file_owner file_group file_size last_modified file_name
+/// ```
 fn display_pathinfo_long(paths: &[PathInfo]) {
     let longpaths = paths
         .iter()

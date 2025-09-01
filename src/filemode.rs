@@ -46,8 +46,7 @@ impl FileMode {
 /// Displays the mode using ls character symbols. This implementation does not fully replicate
 /// ls output because it will never output `S` for the setuid or setgid bits.
 ///
-/// See this stackexchange answer for more details about `s` vs `S`
-/// https://unix.stackexchange.com/a/28412
+/// See this [stackexchange answer](https://unix.stackexchange.com/a/28412) for more details about `s` vs `S`
 impl Display for FileMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let user_write = if self.user_write() { "w" } else { "-" };
