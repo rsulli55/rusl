@@ -1,13 +1,10 @@
 use clap::ArgAction;
 use clap::Parser;
-use itertools::Chunk;
 use itertools::Itertools;
-use itertools::concat;
 use nix::unistd::{Gid, Group, Uid, User};
 use std::fmt;
 use std::fmt::Display;
 use std::fs;
-use std::fs::File;
 use std::fs::Metadata;
 use std::io::Error;
 use std::io::ErrorKind;
@@ -15,11 +12,10 @@ use std::io::Result as IOResult;
 use std::os::linux::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::slice::ChunksExact;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 use termion::color;
 use termion::style;
 use termion::terminal_size;
-use time_format;
 
 const PROGRAM: &str = "rusl";
 const ERR_NO_SUCH_FILE_OR_DIR: &str = "No such file or directory";
@@ -45,10 +41,6 @@ struct Args {
     #[arg(short = 'x', default_value_t = false)]
     by_lines: bool,
 
-    /// use human readable sizes
-    #[arg(short, long, default_value_t = false)]
-    human_readable: bool,
-
     /// Print help
     #[arg(long, action = ArgAction::HelpShort)]
     help: Option<bool>,
@@ -62,9 +54,6 @@ struct DisplayOptions {
     /// use long listing format
     long: bool,
 
-    /// use human readable sizes
-    human_readable: bool,
-
     /// display entries by lines instead of by columns
     by_lines: bool,
 }
@@ -74,7 +63,6 @@ impl From<&Args> for DisplayOptions {
         Self {
             all: value.all,
             long: value.long,
-            human_readable: value.human_readable,
             by_lines: value.by_lines,
         }
     }
@@ -121,7 +109,7 @@ impl PartialEq for PathInfo {
 }
 impl PartialOrd for PathInfo {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.path.partial_cmp(&other.path)
+        Some(self.cmp(other))
     }
 }
 
@@ -150,19 +138,6 @@ impl Display for PathInfo {
 impl PathInfo {
     pub fn new(path: PathBuf, meta: fs::Metadata) -> Self {
         Self { path, meta }
-    }
-
-    pub fn to_string_color(&self) -> String {
-        let mut s = self
-            .path
-            .file_name()
-            .map(|s| s.to_string_lossy())
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        if self.meta.is_dir() {
-            s = format!("{}{s}/{}", color::Fg(color::Blue), color::Fg(color::Reset));
-        }
-        s
     }
 }
 
@@ -206,13 +181,7 @@ fn stat_path(path: &Path) -> Option<fs::Metadata> {
 fn collect_pathinfo(paths: &[&Path]) -> Vec<PathInfo> {
     paths
         .iter()
-        .filter_map(|p| {
-            if let Some(meta) = stat_path(p) {
-                Some(PathInfo::new(p.to_path_buf(), meta))
-            } else {
-                None
-            }
-        })
+        .filter_map(|p| stat_path(p).map(|meta| PathInfo::new(p.to_path_buf(), meta)))
         .collect()
 }
 
@@ -226,11 +195,8 @@ fn recurse_dir(ignore_hidden: bool, dir: &Path) -> Vec<PathInfo> {
     match dir.read_dir() {
         Ok(entries) => entries
             .flat_map(|p| {
-                if p.is_err() {
-                    print_error_msg(
-                        "failed reading directory entry",
-                        &p.as_ref().unwrap_err().to_string(),
-                    );
+                if let Err(err) = &p {
+                    print_error_msg("failed reading directory entry", &err.to_string());
                 }
                 p
             })
@@ -254,57 +220,6 @@ fn recurse_dir(ignore_hidden: bool, dir: &Path) -> Vec<PathInfo> {
             Vec::new()
         }
     }
-}
-
-/// Checks if `path` is either the cwd "." or parent dir ".."
-fn non_trivial_dir(path: &Path) -> bool {
-    !(path == Path::new(".") || path == Path::new(".."))
-}
-
-/// Determines layout of `str_paths` by descending down columns
-// fn determine_layout_by_cols(term_cols: usize, str_paths: &[&str]) -> LayoutInfo {
-//     const MIN_COL_SIZE: usize = 3;
-//     const COL_SEP_LEN: usize = 2;
-//     let max_cols = std::cmp::min(term_cols / MIN_COL_SIZE, str_paths.len());
-
-//     let mut valid_layouts = Vec::with_capacity(max_cols);
-//     for num_cols in 1..=max_cols {
-//         let num_rows = str_paths.len() / num_cols;
-//         let chunks = str_paths.chunks_exact(num_rows);
-//         let rem = chunks.remainder();
-//         let col_width = chunks
-//             .into_iter()
-//             .enumerate()
-//             .map(|(ind, col)| {
-//                 let init = if ind < rem.len() {
-//                     rem[ind].len() + COL_SEP_LEN
-//                 } else {
-//                     MIN_COL_SIZE
-//                 };
-//                 col.iter()
-//                     .fold(init, |acc, s| std::cmp::max(acc, s.len() + COL_SEP_LEN))
-//             })
-//             .collect_vec();
-//         let total_width: usize = col_width.iter().sum();
-//         if total_width <= term_cols {
-//             valid_layouts.push(LayoutInfo::new(num_cols, col_width));
-//         }
-//     }
-//     valid_layouts.pop().unwrap_or_default()
-// }
-
-fn col_widths_by_cols_bad(min_width: usize, num_cols: usize, lens: &[usize]) -> Vec<usize> {
-    let num_rows = lens.len() / num_cols;
-    let chunks = lens.chunks_exact(num_rows);
-    let rem = chunks.remainder();
-    chunks
-        .into_iter()
-        .enumerate()
-        .map(|(ind, col)| {
-            let init = if ind < rem.len() { rem[ind] } else { min_width };
-            col.iter().fold(init, |acc, l| std::cmp::max(acc, *l))
-        })
-        .collect_vec()
 }
 
 fn col_widths_by_cols(min_width: usize, num_cols: usize, lens: &[usize]) -> Vec<usize> {
@@ -347,116 +262,6 @@ fn col_widths_by_lines(min_width: usize, num_cols: usize, lens: &[usize]) -> Vec
     col_width
 }
 
-/// Determines layout of `str_paths` by running across rows
-// fn determine_layout_by_lines(term_cols: usize, str_paths: &[&str]) -> LayoutInfo {
-//     let max_cols = std::cmp::min(term_cols / MIN_COL_SIZE, str_paths.len());
-
-//     let mut valid_num_cols = Vec::with_capacity(max_cols);
-//     let mut col_widths = Vec::with_capacity(max_cols);
-//     let mut valid_layouts = Vec::with_capacity(max_cols);
-//     for num_cols in 1..=max_cols {
-//         let mut col_width = Vec::with_capacity(num_cols);
-//         for offset in 0..num_cols {
-//             let paths_in_col: Vec<_> = str_paths[offset..].iter().step_by(num_cols).collect();
-//             dbg!(&paths_in_col);
-//             let width = str_paths[offset..]
-//                 .iter()
-//                 .step_by(num_cols)
-//                 .fold(MIN_COL_SIZE, |acc, s| {
-//                     std::cmp::max(acc, s.len() + COL_SEP_LEN)
-//                 });
-//             dbg!(num_cols, offset, width);
-//             col_width.push(width);
-//         }
-//         dbg!(&col_width);
-//         let total_width: usize = col_width.iter().sum();
-//         col_widths.push(col_width.clone());
-//         valid_num_cols.push(if total_width <= term_cols {
-//             true
-//         } else {
-//             false
-//         });
-//         if total_width <= term_cols {
-//             valid_layouts.push(LayoutInfo::new(num_cols, col_width));
-//         }
-//     }
-//     let max_cols = valid_num_cols.iter().rposition(|b| *b).unwrap_or(1);
-//     valid_layouts.pop().unwrap_or_default()
-// }
-
-/// Determines a valid layout for the current terminal size and
-/// the strs in `str_paths`
-fn determine_layout2(by_lines: bool, term_cols: usize, str_paths: &[&str]) -> () {
-    let max_cols = std::cmp::min(term_cols / MIN_COL_SIZE, str_paths.len());
-    let lens = str_paths
-        .iter()
-        .map(|s| s.len() + COL_SEP_LEN)
-        .collect_vec();
-
-    let mut valid_num_cols = Vec::with_capacity(max_cols);
-    let mut col_widths = Vec::with_capacity(max_cols);
-    let mut valid_layouts = Vec::with_capacity(max_cols);
-    for num_cols in 1..=max_cols {
-        let num_rows = str_paths.len() / num_cols;
-        let chunks = str_paths.chunks_exact(num_rows);
-        let rem = chunks.remainder();
-        let col_width = chunks
-            .into_iter()
-            .enumerate()
-            .map(|(ind, col)| {
-                let init = if ind < rem.len() {
-                    rem[ind].len() + COL_SEP_LEN
-                } else {
-                    MIN_COL_SIZE
-                };
-                col.iter()
-                    .fold(init, |acc, s| std::cmp::max(acc, s.len() + COL_SEP_LEN))
-            })
-            .collect_vec();
-        let total_width: usize = col_width.iter().sum();
-        if total_width <= term_cols {
-            valid_layouts.push(LayoutInfo::new(num_cols, col_width));
-        }
-    }
-    for num_cols in 1..=max_cols {
-        let mut col_width = Vec::with_capacity(num_cols);
-        for offset in 0..num_cols {
-            let width = if by_lines {
-                // let num_rows = str_paths.len() / num_cols;
-
-                // let paths_in_col: Vec<_> = str_paths[offset..].iter().take()
-                // dbg!(by_lines, &paths_in_col);
-                todo!()
-            } else {
-                let paths_in_col: Vec<_> = str_paths[offset..].iter().step_by(num_cols).collect();
-                dbg!(by_lines, &paths_in_col);
-                str_paths[offset..]
-                    .iter()
-                    .step_by(num_cols)
-                    .fold(MIN_COL_SIZE, |acc, s| {
-                        std::cmp::max(acc, s.len() + COL_SEP_LEN)
-                    })
-            };
-            dbg!(num_cols, by_lines, offset, width);
-            col_width.push(width);
-        }
-        dbg!(&col_width);
-        let total_width: usize = col_width.iter().sum();
-        col_widths.push(col_width.clone());
-        valid_num_cols.push(if total_width <= term_cols {
-            true
-        } else {
-            false
-        });
-        if total_width <= term_cols {
-            valid_layouts.push(LayoutInfo::new(num_cols, col_width));
-        }
-    }
-    let max_cols = valid_num_cols.iter().rposition(|b| *b).unwrap_or(1);
-    dbg!(&valid_num_cols, max_cols);
-    dbg!(&valid_layouts);
-}
-
 /// Determines the layout for displaying a list of strings within the current terminal width with
 /// the maximal amount of columns.
 ///
@@ -478,9 +283,9 @@ fn determine_layout(by_lines: bool, term_cols: usize, lens: &[usize]) -> LayoutI
     let mut valid_layouts = Vec::with_capacity(max_cols);
     for num_cols in 1..=max_cols {
         let col_width = if by_lines {
-            col_widths_by_lines(MIN_COL_SIZE, num_cols, &lens)
+            col_widths_by_lines(MIN_COL_SIZE, num_cols, lens)
         } else {
-            col_widths_by_cols(MIN_COL_SIZE, num_cols, &lens)
+            col_widths_by_cols(MIN_COL_SIZE, num_cols, lens)
         };
         dbg!(&col_width);
         let total_width: usize = col_width.iter().sum();
@@ -608,11 +413,11 @@ impl From<PathInfo> for LongPathInfo {
         // file owner
         let owner_uid = Uid::from_raw(p.meta.st_uid());
         let owner_user = User::from_uid(owner_uid).unwrap_or_default();
-        let file_owner = owner_user.map(|u| u.name).unwrap_or(String::new());
+        let file_owner = owner_user.map(|u| u.name).unwrap_or_default();
         // file groups
         let owner_gid = Gid::from_raw(p.meta.st_gid());
         let owner_group = Group::from_gid(owner_gid).unwrap_or_default();
-        let file_group = owner_group.map(|g| g.name).unwrap_or(String::new());
+        let file_group = owner_group.map(|g| g.name).unwrap_or_default();
         // size
         let size = p.meta.st_size();
         // last modified
@@ -698,12 +503,10 @@ fn display_paths(opts: &DisplayOptions, term_cols: usize, paths: &[PathInfo]) {
     let layout = determine_layout(opts.by_lines, term_cols, &lens);
     if opts.long {
         display_pathinfo_long(paths);
+    } else if opts.by_lines {
+        display_by_lines(&layout, paths);
     } else {
-        if opts.by_lines {
-            display_by_lines(&layout, paths);
-        } else {
-            display_by_cols(&layout, paths);
-        }
+        display_by_cols(&layout, paths);
     }
 }
 
@@ -786,7 +589,7 @@ fn display_by_lines(layout: &LayoutInfo, paths: &[PathInfo]) {
     let chunks = paths.chunks(layout.num_cols);
     for chunk in chunks {
         for (ind, p) in chunk.iter().enumerate() {
-            print_pathinfo(&p, layout.col_width[ind]);
+            print_pathinfo(p, layout.col_width[ind]);
         }
         println!();
     }
@@ -800,7 +603,7 @@ fn display_dir_contents(opts: &DisplayOptions, term_cols: usize, dir: &PathInfo)
         .into_iter()
         .sorted()
         .collect();
-    display_paths(&opts, term_cols, &children);
+    display_paths(opts, term_cols, &children);
 }
 
 fn display_dirs(opts: &DisplayOptions, term_cols: usize, dirs: &[PathInfo]) {
@@ -828,13 +631,10 @@ fn main() -> IOResult<()> {
         args.paths.unwrap()
     };
 
-    let paths = string_paths.iter().map(|s| Path::new(s)).collect_vec();
+    let paths = string_paths.iter().map(Path::new).collect_vec();
 
     let pathsinfo = collect_pathinfo(&paths).into_iter().sorted();
 
-    // let (dirs, file) : (Vec<_>, Vec<_>) =
-    //     paths.into_iter().enumerate().partition(|i, p|
-    //     path_metas[i].is_dir());
     let (dirs, files): (Vec<_>, Vec<_>) = pathsinfo.partition(|p| p.meta.is_dir());
 
     let (term_cols, _) = terminal_size()?;
@@ -846,14 +646,6 @@ fn main() -> IOResult<()> {
     if !dirs.is_empty() {
         display_dirs(&opts, term_cols, &dirs);
     }
-
-    // if dirs.len() == 1 {
-    //        let mut children = recurse_dir(&dirs[0])?;
-    //        children.sort();
-    //     display_paths(&opts, &);
-    // }
-    //
-
     Ok(())
 }
 
