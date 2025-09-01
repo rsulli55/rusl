@@ -6,4 +6,6 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.5.45", features = ["derive"] }
 itertools = "0.14.0"
+nix = { version = "0.30.1", features = ["user"] }
 termion = "4.0.5"
+time-format = "1.2.1"

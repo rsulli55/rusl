@@ -3,6 +3,7 @@ use clap::Parser;
 use itertools::Chunk;
 use itertools::Itertools;
 use itertools::concat;
+use nix::unistd::{Gid, Group, Uid, User};
 use std::fmt;
 use std::fmt::Display;
 use std::fs;
@@ -11,12 +12,14 @@ use std::fs::Metadata;
 use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result as IOResult;
-use std::os::unix::fs::MetadataExt;
+use std::os::linux::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::slice::ChunksExact;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use termion::color;
 use termion::style;
 use termion::terminal_size;
+use time_format;
 
 const PROGRAM: &str = "rusl";
 const ERR_NO_SUCH_FILE_OR_DIR: &str = "No such file or directory";
@@ -469,12 +472,8 @@ fn determine_layout2(by_lines: bool, term_cols: usize, str_paths: &[&str]) -> ()
 /// # Returns
 /// A `LayoutInfo` struct describing the chosen layout (number of columns and their widths). If no valid layout fits,
 /// returns a default `LayoutInfo`.
-fn determine_layout(by_lines: bool, term_cols: usize, paths: &[PathInfo]) -> LayoutInfo {
-    let max_cols = std::cmp::min(term_cols / MIN_COL_SIZE, paths.len());
-    let lens = paths
-        .iter()
-        .map(|p| p.to_string().len() + COL_SEP_LEN)
-        .collect_vec();
+fn determine_layout(by_lines: bool, term_cols: usize, lens: &[usize]) -> LayoutInfo {
+    let max_cols = std::cmp::min(term_cols / MIN_COL_SIZE, lens.len());
 
     let mut valid_layouts = Vec::with_capacity(max_cols);
     for num_cols in 1..=max_cols {
@@ -493,16 +492,218 @@ fn determine_layout(by_lines: bool, term_cols: usize, paths: &[PathInfo]) -> Lay
     valid_layouts.pop().unwrap_or_default()
 }
 
+struct FileMode(u32);
+
+impl FileMode {
+    fn user_execute(&self) -> bool {
+        self.0 & 0o100 != 0
+    }
+    fn user_write(&self) -> bool {
+        self.0 & 0o200 != 0
+    }
+    fn user_read(&self) -> bool {
+        self.0 & 0o400 != 0
+    }
+    fn group_execute(&self) -> bool {
+        self.0 & 0o10 != 0
+    }
+    fn group_write(&self) -> bool {
+        self.0 & 0o20 != 0
+    }
+    fn group_read(&self) -> bool {
+        self.0 & 0o40 != 0
+    }
+    fn other_execute(&self) -> bool {
+        self.0 & 0o1 != 0
+    }
+    fn other_write(&self) -> bool {
+        self.0 & 0o2 != 0
+    }
+    fn other_read(&self) -> bool {
+        self.0 & 0o4 != 0
+    }
+    fn sticky_bit(&self) -> bool {
+        self.0 & 0o1000 != 0
+    }
+    fn sgid_bit(&self) -> bool {
+        self.0 & 0o2000 != 0
+    }
+    fn suid_bit(&self) -> bool {
+        self.0 & 0o4000 != 0
+    }
+}
+
+/// Displays the mode using ls character symbols. This implementation does not fully replicate
+/// ls output because it will never output `S` for the setuid or setgid bits.
+///
+/// See this stackexchange answer for more details about `s` vs `S`
+/// https://unix.stackexchange.com/a/28412
+impl Display for FileMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let user_write = if self.user_write() { "w" } else { "-" };
+        let user_read = if self.user_read() { "r" } else { "-" };
+        let user_execute = if self.user_execute() {
+            "x"
+        } else if self.suid_bit() {
+            "s"
+        } else {
+            "-"
+        };
+        let group_write = if self.group_write() { "w" } else { "-" };
+        let group_read = if self.group_read() { "r" } else { "-" };
+        let group_execute = if self.group_execute() {
+            "x"
+        } else if self.sgid_bit() {
+            "s"
+        } else {
+            "-"
+        };
+        let other_write = if self.other_write() { "w" } else { "-" };
+        let other_read = if self.other_read() { "r" } else { "-" };
+        let other_execute = if self.other_execute() { "x" } else { "-" };
+        let sticky_bit = if self.sticky_bit() { "t" } else { "." };
+        write!(
+            f,
+            "{}{}{}{}{}{}{}{}{}{}",
+            user_write,
+            user_read,
+            user_execute,
+            group_write,
+            group_read,
+            group_execute,
+            other_write,
+            other_read,
+            other_execute,
+            sticky_bit
+        )
+    }
+}
+
+/// Used for displaying path and metadata information using the `-l/--long` option
+struct LongPathInfo {
+    filetype_mode: String,
+    num_links: String,
+    file_owner: String,
+    file_group: String,
+    size: String,
+    last_modified: String,
+    path: PathInfo,
+}
+
+/// Collects `ls` long output metadata from `PathInfo` and produce a `LongPathInfo`
+impl From<PathInfo> for LongPathInfo {
+    fn from(p: PathInfo) -> Self {
+        // filetype and mode
+        let filetype = if p.meta.is_dir() {
+            "d"
+        } else if p.meta.is_symlink() {
+            "l"
+        } else {
+            "-"
+        };
+        let mode = FileMode(p.meta.st_mode()).to_string();
+        let filetype_mode = format!("{filetype}{mode}");
+        // number of links
+        let num_links = p.meta.st_nlink();
+        // file owner
+        let owner_uid = Uid::from_raw(p.meta.st_uid());
+        let owner_user = User::from_uid(owner_uid).unwrap_or_default();
+        let file_owner = owner_user.map(|u| u.name).unwrap_or(String::new());
+        // file groups
+        let owner_gid = Gid::from_raw(p.meta.st_gid());
+        let owner_group = Group::from_gid(owner_gid).unwrap_or_default();
+        let file_group = owner_group.map(|g| g.name).unwrap_or(String::new());
+        // size
+        let size = p.meta.st_size();
+        // last modified
+        // when the modified date is more than 1 year ago, the time is replaced by the
+        // modification year
+        let last_mod_secs = p.meta.st_mtime();
+        let one_year_ago = SystemTime::now() - Duration::from_secs(60 * 24 * 365);
+        let one_year_ago_ts = time_format::from_system_time(one_year_ago).unwrap_or_default();
+        let last_modified = if last_mod_secs < one_year_ago_ts {
+            time_format::strftime_local("%b %d %Y", last_mod_secs).unwrap_or_default()
+        } else {
+            time_format::strftime_local("%b %d %H:%M", last_mod_secs).unwrap_or_default()
+        };
+
+        Self {
+            filetype_mode,
+            num_links: num_links.to_string(),
+            file_owner,
+            file_group,
+            size: size.to_string(),
+            last_modified,
+            path: p,
+        }
+    }
+}
+
+/// Display `paths` using the long format for ls. The structure for the format is
+/// filetype_and_mode number_of_links file_owner file_group file_size last_modified file_name
+fn display_pathinfo_long(paths: &[PathInfo]) {
+    let longpaths = paths
+        .iter()
+        .map(|p| LongPathInfo::from(p.clone()))
+        .collect_vec();
+    let (
+        filetype_mode_width,
+        num_links_width,
+        file_owner_width,
+        file_group_width,
+        size_width,
+        last_modified_width,
+    ) = longpaths.iter().fold((0, 0, 0, 0, 0, 0), |acc, p| {
+        (
+            std::cmp::max(acc.0, p.filetype_mode.len()),
+            std::cmp::max(acc.1, p.num_links.len()),
+            std::cmp::max(acc.2, p.file_owner.len()),
+            std::cmp::max(acc.3, p.file_group.len()),
+            std::cmp::max(acc.4, p.size.len()),
+            std::cmp::max(acc.5, p.last_modified.len()),
+        )
+    });
+    for p in &longpaths {
+        // print all the fields with width and alignment
+        print!("{:filetype_mode_width$} ", p.filetype_mode);
+        print!("{:num_links_width$} ", p.num_links);
+        print!("{:file_owner_width$} ", p.file_owner);
+        print!("{:file_group_width$} ", p.file_group);
+        print!("{:size_width$} ", p.size);
+        print!("{:last_modified_width$} ", p.last_modified);
+        // file_name
+        print_pathinfo(&p.path, 0);
+        // optionally print link info
+        if p.path.meta.is_symlink() {
+            print!(" -> ");
+            let link_target = p.path.path.canonicalize().unwrap_or_default();
+            print!(
+                "{}{}{}{}",
+                style::Bold,
+                color::Fg(color::Green),
+                link_target.display(),
+                style::Reset,
+            );
+        }
+        println!();
+    }
+}
+
 /// Determine a layout for the `paths` based on `term_cols` and display them
 fn display_paths(opts: &DisplayOptions, term_cols: usize, paths: &[PathInfo]) {
-    let layout = determine_layout(opts.by_lines, term_cols, paths);
-
-    // get colored strings to displaying
-    let string_paths = paths.iter().map(|p| p.to_string()).collect_vec();
-    if opts.by_lines {
-        display_by_lines(&layout, paths);
+    let lens = paths
+        .iter()
+        .map(|p| p.to_string().len() + COL_SEP_LEN)
+        .collect_vec();
+    let layout = determine_layout(opts.by_lines, term_cols, &lens);
+    if opts.long {
+        display_pathinfo_long(paths);
     } else {
-        display_by_cols(&layout, paths);
+        if opts.by_lines {
+            display_by_lines(&layout, paths);
+        } else {
+            display_by_cols(&layout, paths);
+        }
     }
 }
 
@@ -540,9 +741,8 @@ fn display_by_cols(layout: &LayoutInfo, paths: &[PathInfo]) {
 }
 
 fn is_executable(metadata: &Metadata) -> bool {
-    let mode = metadata.mode();
-    // Check if any of the executable bits are set (owner, group, or others)
-    mode & 0o111 != 0
+    let mode = FileMode(metadata.st_mode());
+    mode.user_execute() || mode.group_execute() || mode.other_execute()
 }
 
 fn print_pathinfo(path: &PathInfo, col_width: usize) {
@@ -592,26 +792,29 @@ fn display_by_lines(layout: &LayoutInfo, paths: &[PathInfo]) {
     }
 }
 
+fn display_dir_contents(opts: &DisplayOptions, term_cols: usize, dir: &PathInfo) {
+    if opts.long {
+        println!("total {}", dir.meta.st_size());
+    }
+    let children: Vec<_> = recurse_dir(!opts.all, &dir.path)
+        .into_iter()
+        .sorted()
+        .collect();
+    display_paths(&opts, term_cols, &children);
+}
+
 fn display_dirs(opts: &DisplayOptions, term_cols: usize, dirs: &[PathInfo]) {
     // print files from dirs grouped if there are more than one
     if dirs.len() > 1 {
         println!("{}:", dirs[0].path.display());
     }
     for (ind, dir) in dirs[..dirs.len() - 1].iter().enumerate() {
-        let children: Vec<_> = recurse_dir(!opts.all, &dir.path)
-            .into_iter()
-            .sorted()
-            .collect();
-        display_paths(&opts, term_cols, &children);
-        println!("");
+        display_dir_contents(opts, term_cols, dir);
+        println!();
         println!("{}:", dirs[ind + 1].path.display())
     }
     // print the final dir
-    let children: Vec<_> = recurse_dir(!opts.all, &dirs[dirs.len() - 1].path)
-        .into_iter()
-        .sorted()
-        .collect();
-    display_paths(&opts, term_cols, &children);
+    display_dir_contents(opts, term_cols, &dirs[dirs.len() - 1]);
 }
 
 fn main() -> IOResult<()> {
@@ -660,23 +863,17 @@ mod test {
     #[test]
     fn test_determine_layout1() {
         let term_cols = 10;
-        let str_paths = vec!["aaa", "bbb", "cc", "dd"];
+        let lens = vec![5, 5, 4, 4];
         let layout_by_cols = LayoutInfo::new(2, vec![5, 4]);
-        assert_eq!(
-            determine_layout(false, term_cols, &str_paths),
-            layout_by_cols
-        );
+        assert_eq!(determine_layout(false, term_cols, &lens), layout_by_cols);
         let layout_by_lines = LayoutInfo::new(2, vec![5, 5]);
-        assert_eq!(
-            determine_layout(true, term_cols, &str_paths),
-            layout_by_lines
-        );
+        assert_eq!(determine_layout(true, term_cols, &lens), layout_by_lines);
     }
 
     #[test]
     fn test_determine_layout2() {
         let term_cols = 13;
-        let str_paths = vec!["a", "b", "ccccc", "ddddd", "e"];
+        let lens = vec![3, 3, 7, 7, 3];
         // by columns:
         // attempting to layout this in 2 columns fails:
         // the widths are:
@@ -687,10 +884,7 @@ mod test {
         // 3   7   3
         // 3   7
         let layout_by_cols = LayoutInfo::new(3, vec![3, 7, 3]);
-        assert_eq!(
-            determine_layout(false, term_cols, &str_paths),
-            layout_by_cols
-        );
+        assert_eq!(determine_layout(false, term_cols, &lens), layout_by_cols);
         // by lines:
         // attempting to layout this in 2 columns fails:
         // the widths are:
@@ -702,9 +896,6 @@ mod test {
         // 7   3
         // only 1 column will work
         let layout_by_lines = LayoutInfo::new(1, vec![7]);
-        assert_eq!(
-            determine_layout(true, term_cols, &str_paths),
-            layout_by_lines
-        );
+        assert_eq!(determine_layout(true, term_cols, &lens), layout_by_lines);
     }
 }
