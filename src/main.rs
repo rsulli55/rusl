@@ -498,54 +498,60 @@ fn display_paths(opts: &DisplayOptions, term_cols: usize, paths: &[PathInfo]) {
     // get colored strings to displaying
     let string_paths = paths.iter().map(|p| p.to_string()).collect_vec();
     if opts.by_lines {
-        display_by_lines(&layout, &string_paths);
+        display_by_lines(&layout, paths);
     } else {
-        display_by_cols(&layout, &string_paths);
+        display_by_cols(&layout, paths);
     }
 }
 
-fn display_by_cols(layout: &LayoutInfo, str_paths: &[String]) {
+fn display_by_cols(layout: &LayoutInfo, paths: &[PathInfo]) {
     let num_cols = layout.num_cols;
     // the first num_rows rows will be full
-    let num_rows = str_paths.len() / num_cols;
+    let num_rows = paths.len() / num_cols;
     // the final row will consist of rem columns
-    let rem = str_paths.len() % num_cols;
+    let rem = paths.len() % num_cols;
     // dbg!(num_rows, rem, str_paths.len(), str_paths);
     // print the full rows
     for r in 0..num_rows {
         let skip = num_rows + 1;
         let end = r + skip * rem;
-        let strs = str_paths[r..end].iter().step_by(skip);
-        for (c, s) in strs.enumerate() {
-            let indent_len = layout.col_width[c] - s.len();
-            print!("{s}{}", " ".repeat(indent_len));
+        let strs = paths[r..end].iter().step_by(skip);
+        for (c, p) in strs.enumerate() {
+            print_pathinfo(p, layout.col_width[c]);
         }
         let skip = num_rows;
-        let strs = str_paths[end..].iter().step_by(skip);
-        for (c, s) in strs.enumerate() {
+        let strs = paths[end..].iter().step_by(skip);
+        for (c, p) in strs.enumerate() {
             // we've already done the first rem columns
-            let indent_len = layout.col_width[c + rem] - s.len();
-            print!("{s}{}", " ".repeat(indent_len));
+            print_pathinfo(p, layout.col_width[c + rem]);
         }
         println!();
     }
     if rem > 0 {
         // print the final partial row
         let skip = num_rows + 1;
-        let strs = str_paths[num_rows..].iter().step_by(skip);
-        for (c, s) in strs.enumerate() {
-            let indent_len = layout.col_width[c] - s.len();
-            print!("{s}{}", " ".repeat(indent_len));
+        let strs = paths[num_rows..].iter().step_by(skip);
+        for (c, p) in strs.enumerate() {
+            print_pathinfo(p, layout.col_width[c]);
         }
     }
 }
 
-fn display_by_lines(layout: &LayoutInfo, str_paths: &[String]) {
-    let chunks = str_paths.chunks(layout.num_cols);
+fn print_pathinfo(path: &PathInfo, col_width: usize) {
+    let s = path.to_string();
+    let indent_len = col_width - s.len();
+    if path.meta.is_dir() {
+        print!("{}{}{}{}", Fg(Blue), s, Fg(Reset), " ".repeat(indent_len));
+    } else {
+        print!("{}{}", s, " ".repeat(indent_len));
+    }
+}
+
+fn display_by_lines(layout: &LayoutInfo, paths: &[PathInfo]) {
+    let chunks = paths.chunks(layout.num_cols);
     for chunk in chunks {
-        for (ind, s) in chunk.iter().enumerate() {
-            let indent_len = layout.col_width[ind] - s.len();
-            print!("{}{}", s, " ".repeat(indent_len));
+        for (ind, p) in chunk.iter().enumerate() {
+            print_pathinfo(&p, layout.col_width[ind]);
         }
         println!();
     }
