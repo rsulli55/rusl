@@ -11,9 +11,11 @@ use std::fs::Metadata;
 use std::io::Error;
 use std::io::ErrorKind;
 use std::io::Result as IOResult;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::slice::ChunksExact;
-use termion::color::{Blue, Fg, Reset};
+use termion::color;
+use termion::style;
 use termion::terminal_size;
 
 const PROGRAM: &str = "rusl";
@@ -94,7 +96,7 @@ impl Default for LayoutInfo {
     fn default() -> Self {
         Self {
             num_cols: 1,
-            col_width: Vec::new(),
+            col_width: vec![0],
         }
     }
 }
@@ -155,7 +157,7 @@ impl PathInfo {
             .map(|s| s.to_string())
             .unwrap_or_default();
         if self.meta.is_dir() {
-            s = format!("{}{s}/{}", Fg(Blue), Fg(Reset));
+            s = format!("{}{s}/{}", color::Fg(color::Blue), color::Fg(color::Reset));
         }
         s
     }
@@ -537,11 +539,44 @@ fn display_by_cols(layout: &LayoutInfo, paths: &[PathInfo]) {
     }
 }
 
+fn is_executable(metadata: &Metadata) -> bool {
+    let mode = metadata.mode();
+    // Check if any of the executable bits are set (owner, group, or others)
+    mode & 0o111 != 0
+}
+
 fn print_pathinfo(path: &PathInfo, col_width: usize) {
     let s = path.to_string();
-    let indent_len = col_width - s.len();
+    // when there is only 1 column, it is possible that the width does not accomodate the
+    // the string
+    let indent_len = col_width.saturating_sub(s.len());
     if path.meta.is_dir() {
-        print!("{}{}{}{}", Fg(Blue), s, Fg(Reset), " ".repeat(indent_len));
+        print!(
+            "{}{}{}{}{}",
+            style::Bold,
+            color::Fg(color::Blue),
+            s,
+            style::Reset,
+            " ".repeat(indent_len)
+        );
+    } else if path.meta.is_symlink() {
+        print!(
+            "{}{}{}{}{}",
+            style::Bold,
+            color::Fg(color::Cyan),
+            s,
+            style::Reset,
+            " ".repeat(indent_len)
+        );
+    } else if is_executable(&path.meta) {
+        print!(
+            "{}{}{}{}{}",
+            style::Bold,
+            color::Fg(color::Green),
+            s,
+            style::Reset,
+            " ".repeat(indent_len)
+        );
     } else {
         print!("{}{}", s, " ".repeat(indent_len));
     }
