@@ -211,7 +211,13 @@ fn collect_pathinfo(paths: &[&Path]) -> Vec<PathInfo> {
         .collect()
 }
 
-fn recurse_dir(dir: &Path) -> Vec<PathInfo> {
+fn is_hidden(path: &Path) -> bool {
+    path.file_name()
+        .map(|s| s.to_string_lossy())
+        .is_some_and(|s| s.starts_with('.'))
+}
+
+fn recurse_dir(ignore_hidden: bool, dir: &Path) -> Vec<PathInfo> {
     match dir.read_dir() {
         Ok(entries) => entries
             .flat_map(|p| {
@@ -224,7 +230,14 @@ fn recurse_dir(dir: &Path) -> Vec<PathInfo> {
                 p
             })
             .filter_map(|p| match p.metadata() {
-                Ok(meta) => Some(PathInfo::new(p.path(), meta)),
+                Ok(meta) => {
+                    // filter out hidden paths if asked
+                    if ignore_hidden && is_hidden(&p.path()) {
+                        None
+                    } else {
+                        Some(PathInfo::new(p.path(), meta))
+                    }
+                }
                 Err(err) => {
                     inspect_io_error(&p.path(), &err);
                     None
@@ -442,23 +455,23 @@ fn determine_layout2(by_lines: bool, term_cols: usize, str_paths: &[&str]) -> ()
 /// Determines the layout for displaying a list of strings within the current terminal width with
 /// the maximal amount of columns.
 ///
-/// This function calculates possible layouts for the given `str_paths` based on the available terminal columns (`term_cols`)
+/// This function calculates possible layouts for the given `paths` based on the available terminal columns (`term_cols`)
 /// and the minimum column size. It tries different numbers of columns, computes the required width for each layout,
 /// and selects the most space-efficient layout that fits within the terminal.
 ///
 /// # Parameters
 /// - `by_lines`: If `true`, strings in `str_paths` are layed out across rows, otherwise down columns.
 /// - `term_cols`: The total number of columns available in the terminal.
-/// - `str_paths`: A slice of string references representing the items to be displayed.
+/// - `paths`: A slice of PathInfo representing the items to be displayed.
 ///
 /// # Returns
 /// A `LayoutInfo` struct describing the chosen layout (number of columns and their widths). If no valid layout fits,
 /// returns a default `LayoutInfo`.
-fn determine_layout(by_lines: bool, term_cols: usize, str_paths: &[&str]) -> LayoutInfo {
-    let max_cols = std::cmp::min(term_cols / MIN_COL_SIZE, str_paths.len());
-    let lens = str_paths
+fn determine_layout(by_lines: bool, term_cols: usize, paths: &[PathInfo]) -> LayoutInfo {
+    let max_cols = std::cmp::min(term_cols / MIN_COL_SIZE, paths.len());
+    let lens = paths
         .iter()
-        .map(|s| s.len() + COL_SEP_LEN)
+        .map(|p| p.to_string().len() + COL_SEP_LEN)
         .collect_vec();
 
     let mut valid_layouts = Vec::with_capacity(max_cols);
@@ -478,82 +491,20 @@ fn determine_layout(by_lines: bool, term_cols: usize, str_paths: &[&str]) -> Lay
     valid_layouts.pop().unwrap_or_default()
 }
 
-/// Calculates the maximum number of columns supported for the current terminal size and
-/// the strs in `str_paths`
-fn calculate_max_cols(str_paths: &[&str]) -> IOResult<u16> {
-    let (num_cols, num_rows) = terminal_size()?;
-
-    let mut overall_max_cols = 1u16;
-    let mut cur_max_cols = 1u16;
-    let mut cols_left = num_cols;
-    let col_counts: Vec<_> = str_paths
-        .iter()
-        .scan(num_cols, |cols_left, p| {
-            let path_len = p.len() as u16;
-            if path_len < *cols_left {
-                *cols_left -= path_len + 1;
-            } else {
-                *cols_left = num_cols;
-            }
-            Some(*cols_left)
-        })
-        .collect();
-    println!("** col_counts:\n  {:?}\n", &col_counts);
-    let max_col = col_counts
-        .iter()
-        .fold((u16::MAX, 0u16, u16::MAX), |acc, c| {
-            let (prev, cur_run_len, min_run_len) = acc;
-            // if c reset the col count we need to update min_run_len and reset
-            // cur_run_len
-            if prev < *c {
-                let mrl = std::cmp::min(min_run_len, cur_run_len);
-                let crl = 0u16;
-                (*c, crl, mrl)
-            } else {
-                (*c, cur_run_len + 1, min_run_len)
-            }
-        });
-    println!("** max_col:  {:?}", max_col);
-    for p in str_paths {
-        let path_len = p.len() as u16;
-        if path_len < cols_left {
-            cur_max_cols += 1;
-            cols_left -= path_len + 1;
-        } else {
-            overall_max_cols = std::cmp::max(overall_max_cols, cur_max_cols);
-            cur_max_cols = 1;
-            cols_left = num_cols;
-        }
-    }
-    Ok(overall_max_cols)
-}
-
+/// Determine a layout for the `paths` based on `term_cols` and display them
 fn display_paths(opts: &DisplayOptions, term_cols: usize, paths: &[PathInfo]) {
-    let string_paths = paths.iter().map(|p| p.to_string()).collect_vec();
-    let str_paths = if !opts.all {
-        string_paths
-            .iter()
-            .filter_map(|s| {
-                if s.starts_with('.') {
-                    None
-                } else {
-                    Some(s.as_str())
-                }
-            })
-            .collect_vec()
-    } else {
-        string_paths.iter().map(|s| s.as_str()).collect_vec()
-    };
+    let layout = determine_layout(opts.by_lines, term_cols, paths);
 
-    let layout = determine_layout(opts.by_lines, term_cols, &str_paths);
+    // get colored strings to displaying
+    let string_paths = paths.iter().map(|p| p.to_string()).collect_vec();
     if opts.by_lines {
-        display_by_lines(&layout, &str_paths);
+        display_by_lines(&layout, &string_paths);
     } else {
-        display_by_cols(&layout, &str_paths);
+        display_by_cols(&layout, &string_paths);
     }
 }
 
-fn display_by_cols(layout: &LayoutInfo, str_paths: &[&str]) {
+fn display_by_cols(layout: &LayoutInfo, str_paths: &[String]) {
     let num_cols = layout.num_cols;
     // the first num_rows rows will be full
     let num_rows = str_paths.len() / num_cols;
@@ -578,81 +529,23 @@ fn display_by_cols(layout: &LayoutInfo, str_paths: &[&str]) {
         }
         println!();
     }
-    // print the final partial row
-    let skip = num_rows + 1;
-    let strs = str_paths[num_rows..].iter().step_by(skip);
-    for (c, s) in strs.enumerate() {
-        let indent_len = layout.col_width[c] - s.len();
-        print!(
-            "{}{s}{}",
-            termion::color::Fg(termion::color::Blue),
-            " ".repeat(indent_len)
-        );
-    }
-    // print the full rows
-    for r in 0..num_rows {
-        let mut ind = r;
-        for c in 0..num_cols {
-            let s = str_paths[ind];
-            let skip = num_rows + if c < rem { 1 } else { 0 };
-            ind += skip;
-            let indent_len = layout.col_width[c].saturating_sub(s.len());
-            dbg!(c, ind, s, layout.col_width[c], indent_len);
+    if rem > 0 {
+        // print the final partial row
+        let skip = num_rows + 1;
+        let strs = str_paths[num_rows..].iter().step_by(skip);
+        for (c, s) in strs.enumerate() {
+            let indent_len = layout.col_width[c] - s.len();
             print!("{s}{}", " ".repeat(indent_len));
         }
-        println!();
     }
-    // print the final partial row
-    let mut ind = num_rows;
-    let skip = num_rows + 1;
-    for c in 0..rem {
-        let s = str_paths[ind];
-        ind += skip;
-        let indent_len = layout.col_width[c].saturating_sub(s.len());
-        dbg!(s, c, layout.col_width[c], indent_len);
-        print!("{s}{}", " ".repeat(indent_len));
-    }
-    // // the first rem columns skip num_rows + 1 elements
-    // let start = r * num_cols;
-    // let end = r * num_cols + rem;
-    // let skip = num_rows + 1;
-    // let first_batch = str_paths[start..end].iter().step_by(skip).enumerate();
-    // let print_batch = |batch| {
-    //     for (ind, s) in batch {
-    //         let indent_len = (layout.col_width[ind] as usize).saturating_sub((s as &str).len());
-    //         dbg!(s, ind, layout.col_width[ind], indent_len);
-    //         print!("{s}{}", " ".repeat(indent_len));
-    //     }
-    // };
-    // print_batch(first_batch);
-    // // the rest of the columns skip num_rows elements
-    // let start = end;
-    // let end = (r + 1) * num_cols;
-    // let skip = num_rows;
-    // let second_batch = str_paths[start..end].iter().step_by(skip).enumerate();
-    // print_batch(second_batch);
-    // let row_elements = str_paths[col..].iter().step_by(skip).enumerate();
-    // for
-    // // print the first element of the row and calculate the indent needed
-    // row_elements.
-    // if let Some(s) = row_elements.next() {
-    //     print!("{s}");
-    // }
-    // // print the rest of the elements and the
-
-    // row_elements.
-    // for (ind, s) in str_paths[col..].iter().step_by(skip).enumerate() {
-    //     let indent_len = layout.col_width[ind] - s.len();
-    //     print!("{s}{}", " ".repeat(indent_len));
-    // }
 }
 
-fn display_by_lines(layout: &LayoutInfo, str_paths: &[&str]) {
+fn display_by_lines(layout: &LayoutInfo, str_paths: &[String]) {
     let chunks = str_paths.chunks(layout.num_cols);
     for chunk in chunks {
         for (ind, s) in chunk.iter().enumerate() {
             let indent_len = layout.col_width[ind] - s.len();
-            print!("{s}{}", " ".repeat(indent_len));
+            print!("{}{}", s, " ".repeat(indent_len));
         }
         println!();
     }
@@ -664,13 +557,16 @@ fn display_dirs(opts: &DisplayOptions, term_cols: usize, dirs: &[PathInfo]) {
         println!("{}:", dirs[0].path.display());
     }
     for (ind, dir) in dirs[..dirs.len() - 1].iter().enumerate() {
-        let children: Vec<_> = recurse_dir(&dir.path).into_iter().sorted().collect();
+        let children: Vec<_> = recurse_dir(!opts.all, &dir.path)
+            .into_iter()
+            .sorted()
+            .collect();
         display_paths(&opts, term_cols, &children);
         println!("");
         println!("{}:", dirs[ind + 1].path.display())
     }
     // print the final dir
-    let children: Vec<_> = recurse_dir(&dirs[dirs.len() - 1].path)
+    let children: Vec<_> = recurse_dir(!opts.all, &dirs[dirs.len() - 1].path)
         .into_iter()
         .sorted()
         .collect();
@@ -688,7 +584,7 @@ fn main() -> IOResult<()> {
         args.paths.unwrap()
     };
 
-    let paths: Vec<&Path> = string_paths.iter().map(|s| Path::new(s)).collect();
+    let paths = string_paths.iter().map(|s| Path::new(s)).collect_vec();
 
     let pathsinfo = collect_pathinfo(&paths).into_iter().sorted();
 
